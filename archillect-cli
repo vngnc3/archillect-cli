@@ -1,0 +1,229 @@
+#!/usr/bin/env python3
+"""
+archillect-cli — CLI crawler for archillect.com
+Downloads curated visual content from the AI-powered image blog.
+"""
+
+import argparse
+import json
+import os
+import random
+import re
+import sys
+import time
+from pathlib import Path
+from urllib.parse import urljoin
+
+try:
+    import requests
+except ImportError:
+    print("error: requests not installed. run: pip install requests")
+    sys.exit(1)
+
+BASE_URL = "https://archillect.com"
+HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+
+
+def fetch(url, retries=3):
+    """Fetch URL with retry logic."""
+    for attempt in range(retries):
+        try:
+            resp = requests.get(url, headers=HEADERS, timeout=15)
+            resp.raise_for_status()
+            return resp.text
+        except requests.RequestException as e:
+            if attempt == retries - 1:
+                print(f"error: failed to fetch {url}: {e}")
+                return None
+            time.sleep(1)
+    return None
+
+
+def get_latest_post_ids(count=10):
+    """Get the latest N post IDs from the homepage/archive."""
+    html = fetch(BASE_URL)
+    if not html:
+        return []
+    
+    # Find all post IDs in href="/NUMBER" patterns
+    ids = re.findall(r'href="/(\d+)"', html)
+    # Remove duplicates while preserving order
+    seen = set()
+    unique = []
+    for pid in ids:
+        if pid not in seen:
+            seen.add(pid)
+            unique.append(pid)
+    return unique[:count]
+
+
+def get_post_image(post_id):
+    """Fetch a post page and extract the full-res image URL + metadata."""
+    url = f"{BASE_URL}/{post_id}"
+    html = fetch(url)
+    if not html:
+        return None
+    
+    # Extract og:image for full-res URL
+    og_match = re.search(r'<meta[^>]*property="og:image"[^>]*content="([^"]+)"', html)
+    if not og_match:
+        # Fallback: search for img#ii
+        og_match = re.search(r'<img[^>]*id="ii"[^>]*src="([^"]+)"', html)
+    
+    if not og_match:
+        return None
+    
+    img_url = og_match.group(1)
+    
+    # Try to get raw/original size by replacing size suffix
+    # Tumblr uses _1280, _500, _400, _250, _100, _75sq
+    raw_url = re.sub(r'_\d+\.(jpg|jpeg|png|gif)', r'_raw.\1', img_url)
+    if raw_url == img_url:
+        raw_url = re.sub(r'_\d+sq\.(jpg|jpeg|png|gif)', r'_raw.\1', img_url)
+    
+    return {
+        "id": post_id,
+        "url": url,
+        "image_url": img_url,
+        "raw_url": raw_url,
+        "source": "archillect.com"
+    }
+
+
+def download_image(img_url, output_path, retries=3):
+    """Download image to disk."""
+    for attempt in range(retries):
+        try:
+            resp = requests.get(img_url, headers=HEADERS, timeout=30, stream=True)
+            resp.raise_for_status()
+            
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(output_path, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            
+            return True
+        except requests.RequestException as e:
+            if attempt == retries - 1:
+                print(f"  error: download failed: {e}")
+                return False
+            time.sleep(1)
+    return False
+
+
+def get_extension(url):
+    """Extract file extension from URL."""
+    ext = Path(url.split("?")[0]).suffix.lower()
+    if ext not in [".jpg", ".jpeg", ".png", ".gif", ".webp"]:
+        ext = ".jpg"  # default
+    return ext
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Download images from archillect.com",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+examples:
+  archillect-cli --latest 5                    # download 5 latest posts
+  archillect-cli --latest 10 --output ~/pics   # save to custom directory
+  archillect-cli --random                      # download one random post (full collection)
+  archillect-cli --id 410187                   # download specific post
+  archillect-cli --latest 20 --metadata        # also save metadata json
+        """
+    )
+    
+    parser.add_argument("--latest", "-l", type=int, metavar="N",
+                        help="download N latest posts")
+    parser.add_argument("--random", "-r", action="store_true",
+                        help="download one random post")
+    parser.add_argument("--id", type=str,
+                        help="download specific post by ID")
+    parser.add_argument("--output", "-o", type=str, default="./archillect",
+                        help="output directory (default: ./archillect)")
+    parser.add_argument("--metadata", "-m", action="store_true",
+                        help="save metadata as json alongside images")
+    parser.add_argument("--delay", "-d", type=float, default=0.5,
+                        help="delay between requests in seconds (default: 0.5)")
+    
+    args = parser.parse_args()
+    
+    # Determine which posts to download
+    post_ids = []
+    
+    if args.id:
+        post_ids = [args.id]
+    elif args.random:
+        # Get latest ID, pick random from entire collection (0 to latest)
+        latest = get_latest_post_ids(1)
+        if latest:
+            max_id = int(latest[0])
+            post_ids = [str(random.randint(0, max_id))]
+    elif args.latest:
+        post_ids = get_latest_post_ids(args.latest)
+    else:
+        parser.print_help()
+        sys.exit(0)
+    
+    if not post_ids:
+        print("error: could not find any posts")
+        sys.exit(1)
+    
+    output_dir = Path(args.output)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    print(f"archillect-cli — downloading {len(post_ids)} post(s) to {output_dir}")
+    print()
+    
+    downloaded = 0
+    failed = 0
+    
+    for i, post_id in enumerate(post_ids, 1):
+        print(f"[{i}/{len(post_ids)}] fetching post {post_id}...", end=" ")
+        
+        meta = get_post_image(post_id)
+        if not meta:
+            print("failed (no image found)")
+            failed += 1
+            continue
+        
+        ext = get_extension(meta["image_url"])
+        filename = f"archillect_{post_id}{ext}"
+        filepath = output_dir / filename
+        
+        # Skip if already exists
+        if filepath.exists():
+            print(f"skipped (already exists: {filename})")
+            downloaded += 1
+            continue
+        
+        # Try raw URL first, fall back to 1280
+        success = False
+        for url_key in ["raw_url", "image_url"]:
+            if download_image(meta[url_key], filepath):
+                print(f"saved {filename}")
+                downloaded += 1
+                success = True
+                break
+        
+        if not success:
+            print("failed (download error)")
+            failed += 1
+            continue
+        
+        # Save metadata if requested
+        if args.metadata:
+            meta_path = output_dir / f"archillect_{post_id}.json"
+            with open(meta_path, "w") as f:
+                json.dump(meta, f, indent=2)
+        
+        # Rate limiting
+        if i < len(post_ids):
+            time.sleep(args.delay)
+    
+    print()
+    print(f"done — downloaded: { downloaded}, failed: { failed}, total: { len(post_ids)}")
+
+
+if __name__ == "__main__":
+    main()
