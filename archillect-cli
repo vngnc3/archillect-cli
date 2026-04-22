@@ -76,10 +76,11 @@ def get_post_image(post_id):
     img_url = og_match.group(1)
     
     # Try to get raw/original size by replacing size suffix
-    # Tumblr uses _1280, _500, _400, _250, _100, _75sq
-    raw_url = re.sub(r'_\d+\.(jpg|jpeg|png|gif)', r'_raw.\1', img_url)
+    # Tumblr/CDN uses _1280, _500, _400, _250, _100, _75sq, _540, etc.
+    raw_url = re.sub(r'_\d+([a-z]*)?\.(jpg|jpeg|png|gif)', r'_raw.\2', img_url, flags=re.IGNORECASE)
+    # If no size suffix found, raw is same as original
     if raw_url == img_url:
-        raw_url = re.sub(r'_\d+sq\.(jpg|jpeg|png|gif)', r'_raw.\1', img_url)
+        raw_url = img_url
     
     return {
         "id": post_id,
