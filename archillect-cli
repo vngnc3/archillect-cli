@@ -57,6 +57,61 @@ def get_latest_post_ids(count=10):
     return unique[:count]
 
 
+def extract_og_image(html):
+    """Extract og:image URL with multiple regex patterns for robustness."""
+    patterns = [
+        # Standard double-quoted, property before content
+        r'<meta[^>]*property=["\']og:image["\'][^>]*content=["\']([^"\']+)["\']',
+        # Content before property
+        r'<meta[^>]*content=["\']([^"\']+)["\'][^>]*property=["\']og:image["\']',
+        # Property with prefix (e.g., xmlns:og)
+        r'<meta[^>]*content=["\']([^"\']+)["\'][^>]*property=["\']og:image["\']',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, html, re.IGNORECASE)
+        if match:
+            url = match.group(1).strip()
+            if url.startswith('http'):
+                return url
+    return None
+
+
+def extract_img_tag(html):
+    """Extract image from img#ii or main image element."""
+    patterns = [
+        # img#ii
+        r'<img[^>]*id=["\']ii["\'][^>]*src=["\']([^"\']+)["\']',
+        # src before id
+        r'<img[^>]*src=["\']([^"\']+)["\'][^>]*id=["\']ii["\']',
+        # Any img with tumblr in src (broader fallback)
+        r'<img[^>]*src=["\']([^"\']*tumblr[^"\']*)["\']',
+        # Any img with media file extension
+        r'<img[^>]*src=["\']([^"\']*\.(?:jpg|jpeg|png|gif))["\']',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, html, re.IGNORECASE)
+        if match:
+            url = match.group(1).strip()
+            if url.startswith('http'):
+                return url
+    return None
+
+
+def get_raw_url(img_url):
+    """Generate raw/original URL from Tumblr-sized URL."""
+    if not img_url:
+        return None
+    
+    # Tumblr/CDN uses _1280, _500, _400, _250, _100, _75sq, _540, etc.
+    raw = re.sub(r'_\d+([a-z]*)?\.(jpg|jpeg|png|gif)', r'_raw.\2', img_url, flags=re.IGNORECASE)
+    
+    # If no size suffix was found, raw is same as original
+    if raw == img_url:
+        return img_url
+    
+    return raw
+
+
 def get_post_image(post_id):
     """Fetch a post page and extract the full-res image URL + metadata."""
     url = f"{BASE_URL}/{post_id}"
@@ -64,23 +119,17 @@ def get_post_image(post_id):
     if not html:
         return None
     
-    # Extract og:image for full-res URL
-    og_match = re.search(r'<meta[^>]*property="og:image"[^>]*content="([^"]+)"', html)
-    if not og_match:
-        # Fallback: search for img#ii
-        og_match = re.search(r'<img[^>]*id="ii"[^>]*src="([^"]+)"', html)
+    # Try og:image first (highest quality, canonical)
+    img_url = extract_og_image(html)
     
-    if not og_match:
+    # Fallback to img tag extraction
+    if not img_url:
+        img_url = extract_img_tag(html)
+    
+    if not img_url:
         return None
     
-    img_url = og_match.group(1)
-    
-    # Try to get raw/original size by replacing size suffix
-    # Tumblr/CDN uses _1280, _500, _400, _250, _100, _75sq, _540, etc.
-    raw_url = re.sub(r'_\d+([a-z]*)?\.(jpg|jpeg|png|gif)', r'_raw.\2', img_url, flags=re.IGNORECASE)
-    # If no size suffix found, raw is same as original
-    if raw_url == img_url:
-        raw_url = img_url
+    raw_url = get_raw_url(img_url)
     
     return {
         "id": post_id,
